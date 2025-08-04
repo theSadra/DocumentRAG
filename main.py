@@ -1,10 +1,12 @@
 import streamlit as st
 from openai import OpenAI
+from dotenv import load_dotenv
 import os
-# hi
 # Set your OpenAI API key
-client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY", ""),
-                timeout=120)
+
+load_dotenv()
+api_key = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=api_key, timeout=120)
 
 # Set session state variables for assistant, thread, and uploaded files
 if "assistant_id" not in st.session_state:
