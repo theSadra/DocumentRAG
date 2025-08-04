@@ -4,8 +4,8 @@ from dotenv import load_dotenv
 import os
 import fitz  # PyMuPDF
 from io import BytesIO
-
-# Load environment variables
+#
+# Load environment  variables
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=api_key, timeout=120)
