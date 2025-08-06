@@ -2,97 +2,113 @@ import streamlit as st
 from openai import OpenAI
 from dotenv import load_dotenv
 import os
-import fitz  # PyMuPDF
 from io import BytesIO
-#
-# Load environment  variables
+
+# Load environment variables
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=api_key, timeout=120)
 
-# Session state for app
+# Session state init
 if "assistant_id" not in st.session_state:
     st.session_state.assistant_id = None
-if "thread_id" not in st.session_state:
-    st.session_state.thread_id = None
-if "file_ids" not in st.session_state:
-    st.session_state.file_ids = []
-if "pdf_file" not in st.session_state:
-    st.session_state.pdf_file = None
-if "uploaded_to_openai" not in st.session_state:
-    st.session_state.uploaded_to_openai = False
+if "vector_store_map" not in st.session_state:
+    st.session_state.vector_store_map = {}  # file_id -> vector_store_id
+if "selected_vs_ids" not in st.session_state:
+    st.session_state.selected_vs_ids = []
 
+# Helper functions
+def list_assistants():
+    return {a.id: a.name for a in client.beta.assistants.list().data}
+
+def list_files():
+    return {f.id: f.filename for f in client.files.list().data}
+
+def create_vector_store_for_file(file_id, filename):
+    vs = client.vector_stores.create(
+        name=filename,
+        file_ids=[file_id]
+    )
+    return vs.id
+
+def delete_vector_store(vs_id):
+    client.vector_stores.delete(vector_store_id=vs_id)
+
+# UI
 st.title("📄 Chat with your PDF")
 
-# Step 1: Upload PDF
-uploaded_file = st.file_uploader("Choose a PDF to preview and use", type=["pdf"])
+# 1) Assistant selection/creation
+st.subheader("🦾 Assistant")
+assts = list_assistants()
+options = [f"{n} ({i})" for i, n in assts.items()] + ["Create New Assistant"]
+choice = st.selectbox("Choose Assistant:", options)
+if choice == "Create New Assistant" and st.button("➕ Create Assistant"):
+    new = client.beta.assistants.create(
+        name="PDF Assistant",
+        instructions="Answer only from uploaded PDFs.",
+        model="gpt-4o",
+        tools=[{"type": "file_search"}]
+    )
+    st.session_state.assistant_id = new.id
+    st.success(f"Created assistant {new.name} ({new.id})")
+elif choice != "Create New Assistant":
+    aid = choice.split("(")[-1].strip(")")
+    st.session_state.assistant_id = aid
+    st.success(f"Using assistant {assts[aid]} ({aid})")
 
-if uploaded_file:
-    st.session_state.pdf_file = uploaded_file
-    st.session_state.uploaded_to_openai = False  # Reset state on new upload
+# 2) Upload & manage files/vector stores
+st.subheader("📂 Files & Vector Stores")
+files = list_files()
+# existing files selection
+for file_id, name in files.items():
+    checked = file_id in st.session_state.selected_vs_ids
+    toggle = st.checkbox(f"{name} ({file_id})", value=checked, key=file_id)
+    if toggle and file_id not in st.session_state.selected_vs_ids:
+        if file_id not in st.session_state.vector_store_map:
+            vsid = create_vector_store_for_file(file_id, name)
+            st.session_state.vector_store_map[file_id] = vsid
+        st.session_state.selected_vs_ids.append(file_id)
+    if not toggle and file_id in st.session_state.selected_vs_ids:
+        st.session_state.selected_vs_ids.remove(file_id)
 
-    # Show first page preview
-    doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
-    first_page = doc.load_page(0)
-    pix = first_page.get_pixmap()
-    img_bytes = BytesIO(pix.tobytes("png"))
-    st.image(img_bytes, caption="First Page Preview", use_container_width=True)
+# upload new PDF
+upload = st.file_uploader("Upload new PDF", type=["pdf"])
+if upload and st.button("📤 Upload & Build Store"):
+    f = client.files.create(file=upload, purpose="assistants")
+    vsid = create_vector_store_for_file(f.id, f.filename)
+    st.session_state.vector_store_map[f.id] = vsid
+    st.session_state.selected_vs_ids.append(f.id)
+    st.success(f"Uploaded {f.filename}, vector store {vsid}")
 
-    # Reset file position for re-upload
-    uploaded_file.seek(0)
+# delete selected
+if st.button("🗑️ Delete Selected Files & Stores"):
+    for fid in list(st.session_state.selected_vs_ids):
+        vsid = st.session_state.vector_store_map.pop(fid, None)
+        if vsid:
+            delete_vector_store(vsid)
+        client.files.delete(file_id=fid)
+    st.session_state.selected_vs_ids = []
+    st.success("Deleted selected files and their vector stores.")
 
-    # Upload button
-    if st.button("📤 Upload to OpenAI"):
-        with st.spinner("Uploading to OpenAI..."):
-            file = client.files.create(file=uploaded_file, purpose="assistants")
-            st.session_state.file_ids = [file.id]
-            st.session_state.uploaded_to_openai = True
-        st.success("File uploaded and ready for assistant.")
-
-# Step 2: Create assistant (after OpenAI upload)
-if st.session_state.uploaded_to_openai and st.session_state.assistant_id is None:
-    with st.spinner("Creating assistant..."):
-        assistant = client.beta.assistants.create(
-            name="PDF Assistant",
-            instructions="You are a helpful assistant. Answer questions based only on the uploaded documents.",
-            model="gpt-4o",
-            tools=[{"type": "file_search"}]
+# 3) Ask question
+st.subheader("💬 Ask a question")
+query = st.text_input("Your question:")
+if st.button("Ask") and query and st.session_state.assistant_id:
+    vs_ids = list(st.session_state.vector_store_map.values())
+    if not vs_ids:
+        st.error("Please upload or select at least one PDF first.")
+    else:
+        thread = client.beta.threads.create(
+            tool_resources={"file_search": {"vector_store_ids": vs_ids}},
+            messages=[{"role": "user", "content": query}]
         )
-        st.session_state.assistant_id = assistant.id
-    st.success("Assistant created!")
-
-# Step 3: Ask question
-st.subheader("💬 Ask a question about the PDF")
-user_input = st.text_input("Your question:", placeholder="e.g. Summarize this document...", key="user_question")
-
-if st.button("Ask") and user_input and st.session_state.file_ids:
-    with st.spinner("Thinking..."):
-        # Create a new thread for each question to avoid previous context
-        st.session_state.thread_id = None
-        thread = client.beta.threads.create()
-        st.session_state.thread_id = thread.id
-
-        # Send user message
-        client.beta.threads.messages.create(
-            thread_id=st.session_state.thread_id,
-            role="user",
-            content=user_input,
-            attachments=[
-                {"file_id": file_id, "tools": [{"type": "file_search"}]}
-                for file_id in st.session_state.file_ids
-            ]
-        )
-
-        # Run assistant
-        run = client.beta.threads.runs.create_and_poll(
-            thread_id=st.session_state.thread_id,
+        client.beta.threads.runs.create_and_poll(
+            thread_id=thread.id,
             assistant_id=st.session_state.assistant_id
         )
-
-        # Get response
-        messages = client.beta.threads.messages.list(thread_id=st.session_state.thread_id)
-        for msg in reversed(messages.data):
-            if msg.role == "assistant":
+        msgs = client.beta.threads.messages.list(thread_id=thread.id).data
+        for m in reversed(msgs):
+            if m.role == "assistant":
                 st.markdown("### 🤖 Assistant Response")
-                st.write(msg.content[0].text.value)
+                st.write(m.content[0].text.value)
                 break
