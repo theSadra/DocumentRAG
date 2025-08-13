@@ -23,6 +23,13 @@ if "merged_vector_stores" not in st.session_state:
 if "current_vs_id" not in st.session_state:
     st.session_state.current_vs_id = None
 
+# Helper for rerun compatibility
+def safe_rerun():
+    try:
+        st.rerun()
+    except AttributeError:
+        pass
+
 # Helper functions
 def list_assistants():
     return {a.id: a.name for a in client.beta.assistants.list().data}
@@ -98,7 +105,7 @@ with files_tab:
                 st.info(f"Created vector store {vsid} for {f.filename}")
         if auto_vs and created_vs_count:
             st.success(f"Created {created_vs_count} vector store(s).")
-        st.experimental_rerun()
+        safe_rerun()
 
     st.markdown("---")
     st.subheader("Stored Files")
@@ -125,6 +132,7 @@ with files_tab:
                         vsid = create_vector_store_for_file(fid, filename)
                         st.session_state.vector_store_map[fid] = vsid
                         st.success(f"Created vector store {vsid} for file {fid}")
+                    safe_rerun()
         with col_f2:
             if st.button("🗑️ Delete Selected Files", help="Also deletes any vector stores containing these files"):
                 if not st.session_state.files_selected:
@@ -147,6 +155,7 @@ with files_tab:
                             st.session_state.files_selected.remove(fid)
                     if deleted_any:
                         st.success("Deleted selected files and related vector stores.")
+                        safe_rerun()
 
     st.markdown("---")
     st.subheader("Merge Selected Files into One Vector Store")
@@ -165,6 +174,7 @@ with files_tab:
             st.session_state.merged_vector_stores[merged_vs] = {"name": resolved_name, "file_ids": file_ids}
             st.session_state.current_vs_id = merged_vs
             st.success(f"Created merged vector store '{resolved_name}' ({merged_vs}) and set active.")
+            safe_rerun()
 
 with vs_tab:
     st.subheader("Vector Stores")
@@ -216,6 +226,7 @@ with vs_tab:
                         st.session_state.current_vs_id = None
                     st.session_state.vs_selected_for_deletion.remove(vsid)
                     st.success(f"Deleted vector store {vsid}")
+                safe_rerun()
 
 with assistant_tab:
     st.subheader("Assistants")
@@ -232,6 +243,7 @@ with assistant_tab:
             )
             st.session_state.assistant_id = new.id
             st.success(f"Created assistant {new.name} ({new.id})")
+            safe_rerun()
     else:
         aid = choice.split("(")[-1].strip(")")
         st.session_state.assistant_id = aid
