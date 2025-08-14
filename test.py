@@ -2,7 +2,6 @@ import streamlit as st
 from openai import OpenAI
 from dotenv import load_dotenv
 import os
-from io import BytesIO
 
 # Load environment variables
 load_dotenv()
@@ -17,6 +16,22 @@ if "vector_store_map" not in st.session_state:
 if "selected_vs_ids" not in st.session_state:
     st.session_state.selected_vs_ids = []
 
+# Auto-initialize vector_store_map with existing vector stores from OpenAI
+if not st.session_state.vector_store_map:
+    # Load vector stores
+    # Get all files: id -> filename
+    files = {f.id: f.filename for f in client.files.list().data}
+
+    # Get all vector stores
+    vector_stores = client.vector_stores.list().data
+
+    # Map file_id -> vector_store_id by matching vector_store.name to filename
+    for vs in vector_stores:
+        for fid, fname in files.items():
+            if vs.name == fname:
+                st.session_state.vector_store_map[fid] = vs.id
+                break
+
 # Helper functions
 def list_assistants():
     return {a.id: a.name for a in client.beta.assistants.list().data}
@@ -25,11 +40,7 @@ def list_files():
     return {f.id: f.filename for f in client.files.list().data}
 
 def create_vector_store_for_file(file_id, filename):
-    # Use create (auto-ingests file_ids) instead of create_and_poll
-    vs = client.vector_stores.create(
-        name=filename,
-        file_ids=[file_id]
-    )
+    vs = client.vector_stores.create(name=filename, file_ids=[file_id])
     return vs.id
 
 def delete_vector_store(vs_id):
@@ -67,28 +78,6 @@ elif choice != "Create New Assistant":
 st.subheader("📂 Files & Vector Stores")
 files = list_files()
 
-# Single file selection using radio button
-file_options = [(name, file_id) for file_id, name in files.items()]
-selected_file = st.radio(
-    "Select a file to use for the assistant:",
-    options=file_options,
-    format_func=lambda x: f"{x[0]} ({x[1]})" if isinstance(x, tuple) else x
-)
-
-if selected_file:
-    file_id = selected_file[1]
-    # Ensure vector store exists for the selected file
-    if file_id not in st.session_state.vector_store_map:
-        vsid = create_vector_store_for_file(file_id, files[file_id])
-        st.session_state.vector_store_map[file_id] = vsid
-    else:
-        vsid = st.session_state.vector_store_map[file_id]
-
-    # Button to update assistant with only the selected file's vector store
-    if st.button("Update Assistant with Selected File"):
-        update_assistant_vs(st.session_state.assistant_id, [vsid])
-        st.success(f"Assistant updated with vector store {vsid} for file {files[file_id]}")
-
 # upload new PDF
 upload = st.file_uploader("Upload new PDF", type=["pdf"])
 if upload and st.button("📤 Upload & Build Store"):
@@ -96,7 +85,6 @@ if upload and st.button("📤 Upload & Build Store"):
     vsid = create_vector_store_for_file(f.id, f.filename)
     st.session_state.vector_store_map[f.id] = vsid
     st.session_state.selected_vs_ids.append(f.id)
-    # update_assistant_vs(st.session_state.assistant_id, list(st.session_state.vector_store_map.values()))
     st.success(f"Uploaded {f.filename}, vector store {vsid}")
 
 # delete selected
@@ -107,19 +95,33 @@ if st.button("🗑️ Delete Selected Files & Stores"):
             delete_vector_store(vsid)
         client.files.delete(file_id=fid)
     st.session_state.selected_vs_ids = []
-    #update_assistant_vs(st.session_state.assistant_id, list(st.session_state.vector_store_map.values()))
     st.success("Deleted selected files and their vector stores.")
 
-# 3) Ask question
+# 3) Ask question and update assistant vector store
 st.subheader("💬 Ask a question")
-query = st.text_input("Your question:")
-if st.button("Ask") and query and st.session_state.assistant_id:
-    vs_ids = list(st.session_state.vector_store_map.values())
-    if not vs_ids:
-        st.error("Please upload or select at least one PDF first.")
-    else:
+
+# Let the user select a file for querying and assistant update
+if st.session_state.vector_store_map:
+    file_choices = {
+        fid: f"{list_files().get(fid, 'Unknown file')} ({fid})"
+        for fid in st.session_state.vector_store_map.keys()
+    }
+
+    selected_fid = st.selectbox(
+        "Choose a file to use and ask about:",
+        options=list(file_choices.keys()),
+        format_func=lambda x: file_choices[x]
+    )
+    vsid = st.session_state.vector_store_map[selected_fid]
+
+    if st.button("Update Assistant with Selected File"):
+        update_assistant_vs(st.session_state.assistant_id, [vsid])
+        st.success(f"Assistant updated with vector store {vsid} for file {file_choices[selected_fid]}")
+
+    query = st.text_input("Your question:")
+    if st.button("Ask") and query and st.session_state.assistant_id:
         thread = client.beta.threads.create(
-            tool_resources={"file_search": {"vector_store_ids": vs_ids}},
+            tool_resources={"file_search": {"vector_store_ids": [vsid]}},
             messages=[{"role": "user", "content": query}]
         )
         client.beta.threads.runs.create_and_poll(
@@ -132,3 +134,5 @@ if st.button("Ask") and query and st.session_state.assistant_id:
                 st.markdown("### 🤖 Assistant Response")
                 st.write(m.content[0].text.value)
                 break
+else:
+    st.warning("Please upload a PDF and build a vector store before asking a question.")
